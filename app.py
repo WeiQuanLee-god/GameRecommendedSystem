@@ -1,14 +1,13 @@
 import streamlit as st
 import pandas as pd
 
-# Page setup
 st.set_page_config(page_title="Game Recommender System", page_icon="👾", layout="centered")
 
 # Header
 st.title("🕹️Game Recommender System")
 st.markdown("Get personalized mobile game suggestions based on the top games from Google Play Store.")
 
-# Load dataset
+# Read the dataset
 @st.cache_data
 def load_data():
     df = pd.read_csv("D:/AI_Project/games.csv")  # Make sure this path is correct
