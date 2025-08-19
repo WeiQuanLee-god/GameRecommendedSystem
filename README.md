@@ -1,4 +1,6 @@
 # GameRecommendedSystem
 AI Assignment
 
-The filter still have some bugs（the filter can typing)
+The filter still have some bugs（the filter can typing) - done
+Algorithm - process
+Design - process
