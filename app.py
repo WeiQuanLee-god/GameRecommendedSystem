@@ -5,14 +5,8 @@ import re, os
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# =========================
-# SETTINGS
-# =========================
 CSV_PATH = "D:/AI_Project/games.csv"   
 
-# =========================
-# Helpers
-# =========================
 def parse_installs(val):
     if pd.isna(val): return np.nan
     s = str(val).strip()
@@ -101,14 +95,11 @@ def recommend(df, X, boosts, seed_indices, top_k=12, rule_filters=None, alpha=0.
     top_idx = np.argsort(scores)[::-1][:top_k]
     return [i for i in top_idx if scores[i] >= 0], scores
 
-# =========================
 # UI
-# =========================
 st.set_page_config(page_title="Game Recommender System (Hybrid AI)", page_icon="👾", layout="wide")
 st.title("🕹️ Top Games Recommender")
 st.caption(f"Data source: `{CSV_PATH}` (auto‑reloads when the file changes)")
 
-# Load data automatically (no button, no path input)
 try:
     mtime = os.path.getmtime(CSV_PATH) if os.path.exists(CSV_PATH) else 0.0
     df = load_data(CSV_PATH, mtime)
@@ -116,7 +107,6 @@ try:
 except Exception as e:
     st.error(f"Could not load dataset at {CSV_PATH}. Error: {e}")
     st.stop()
-
 
 st.sidebar.header("🧷 Filters")
 price_type = st.sidebar.selectbox("Price Type 💰", ["All","Free","Paid"])
@@ -139,7 +129,7 @@ rule_filters = dict(
     min_installs=min_installs
 )
 
-# ---- Seed selection
+# Seed selection
 st.subheader("1) Pick games you like 🎯")
 seed_titles = st.multiselect("Choose games:", options=df['title'].tolist())
 seed_idx = list(df.index[df['title'].isin(seed_titles)])
@@ -154,7 +144,6 @@ with st.expander("🔎 Search to find seeds"):
         ][['title','category','average_rating','installs']].head(30)
         st.dataframe(hits)
 
-# ---- Recommendations (auto updates when any control changes; no button needed)
 st.subheader("2) Recommendations ✅")
 k = st.number_input("Number of recommendations", min_value=5, max_value=40, value=12)
 
@@ -186,7 +175,6 @@ st.subheader("Or, browse trending 🔥")
 
 hybrid_base = hybrid_score(np.zeros(len(df)), boosts, alpha=0, beta=0.7, gamma=0.3)
 
-# Build mask as Series aligned to df.index
 mask = pd.Series(True, index=df.index)
 if price_type == "Free":
     mask &= (df['price'] == 0.0)
@@ -197,16 +185,15 @@ if chosen_cat != "All":
 mask &= (df['average_rating'] >= min_rating)
 mask &= (df['installs'] >= min_installs)
 
-# Convert to positional boolean array
 mask_arr = mask.to_numpy()
 
-order = np.argsort(hybrid_base)[::-1]          # positions (0..N-1)
+order = np.argsort(hybrid_base)[::-1]         
 trending_idx = [i for i in order if mask_arr[i]][:10]
 
 if trending_idx:
     cols = st.columns(2)
     for j, i in enumerate(trending_idx, start=1):
-        row = df.iloc[i]                       # positional access
+        row = df.iloc[i]                       
         with cols[(j-1) % 2]:
             st.markdown(
                 f"**{j}. {row['title']}**  \n"
@@ -216,3 +203,4 @@ if trending_idx:
             )
 else:
     st.info("No trending items match your filters.")
+
