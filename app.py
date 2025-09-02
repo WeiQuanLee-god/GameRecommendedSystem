@@ -1,22 +1,25 @@
+# app.py
+# Top Games Recommender – Content-Based + Collaborative Filtering + Hybrid
+# OFFICIAL SUBMISSION (Single-member): Method = Content-Based | Algorithm = TF‑IDF + Cosine kNN
+#
+# Notes:
+# - CF (Item‑Item co‑visitation kNN) and Hybrid are kept for demo/comparison,
+#   but the *assessed* method/algorithm pair is Content‑Based using TF‑IDF + Cosine kNN.
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re, os
+import os, re
 from typing import List, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.linear_model import SGDClassifier
-from scipy.sparse import vstack as sp_vstack
 
-# =========================
+
 # SETTINGS
-# =========================
 CSV_PATH = "D:/AI_Project/games.csv"   # change if needed
 SEED_DEFAULT_K = 12
 
-# =========================
 # Helpers
-# =========================
 def parse_installs(val):
     if pd.isna(val): return np.nan
     s = str(val).strip()
@@ -39,19 +42,20 @@ def load_data(csv_path: str, mtime: float):
     rename_map = {
         'average rating':'average_rating','Average Rating':'average_rating',
         'total ratings':'total_ratings','Total Ratings':'total_ratings',
-        'Installs':'installs','installs+':'installs',
-        'Category':'category','Title':'title','Price':'price','Description':'description'
+        'Installs':'installs','installs+':'installs','installs':'installs',
+        'Category':'category','Title':'title','Price':'price','Description':'description',
+        'rank':'rank','Rank':'rank'
     }
     for k,v in rename_map.items():
         if k in df.columns and v not in df.columns:
             df = df.rename(columns={k:v})
 
-    for col in ['title','category','price','installs','average_rating','total_ratings']:
+    for col in ['title','category','price','installs','average_rating','total_ratings','rank']:
         if col not in df.columns: df[col] = np.nan
     if 'description' not in df.columns: df['description'] = ''
 
     df['installs'] = df['installs'].apply(parse_installs).fillna(0)
-    for c in ['price','average_rating','total_ratings']:
+    for c in ['price','average_rating','total_ratings','rank']:
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
     df['title'] = df['title'].astype(str)
@@ -61,9 +65,13 @@ def load_data(csv_path: str, mtime: float):
     df.reset_index(drop=True, inplace=True)
     return df
 
-# ===== Content representation
+# Content representation (ALGORITHM: TF‑IDF + Cosine kNN)
 @st.cache_data(show_spinner=False)
 def build_content_matrix(df):
+    """
+    Algorithm: TF‑IDF vectorization over title + category (+ optional description),
+    with cosine similarity for k‑nearest‑neighbour retrieval.
+    """
     text_corpus = df['category'] + ' ' + df['title'] + ' ' + df['description']
     vectorizer = TfidfVectorizer(lowercase=True, stop_words='english', ngram_range=(1,2), min_df=2)
     tfidf_matrix = vectorizer.fit_transform(text_corpus)
@@ -72,7 +80,7 @@ def build_content_matrix(df):
 @st.cache_data(show_spinner=False)
 def prepare_model(df: pd.DataFrame):
     vec, X = build_content_matrix(df)
-    # popularity & quality features
+    # Signals for Hybrid weighting (method, not algorithm)
     log_inst = np.log1p(df['installs'])
     pop_norm = (log_inst - log_inst.min()) / (log_inst.max() - log_inst.min() + 1e-9)
     rat_norm = (df['average_rating'] - df['average_rating'].min()) / (
@@ -87,15 +95,73 @@ def prepare_model(df: pd.DataFrame):
     })
     return vec, X, boosts
 
-# ===== Scoring utilities
+# Collaborative Filtering via Co‑Visitation (Item‑Item kNN)
+@st.cache_data(show_spinner=False)
+def build_item_item_cf(df: pd.DataFrame, window: int = 60) -> np.ndarray:
+    """
+    Method: Collaborative Filtering
+    Algorithm variant: Item‑Item kNN using co‑visitation (synthetic sessions) with cosine normalization.
+    """
+    n = len(df)
+    co = np.zeros((n, n), dtype=np.float32)
 
+    def add_session(indices):
+        L = len(indices)
+        for i in range(L):
+            a = indices[i]
+            for j in range(i+1, L):
+                b = indices[j]
+                co[a, b] += 1.0
+                co[b, a] += 1.0
+
+    # Per‑category sessions
+    cats = df['category'].fillna('UNKNOWN').unique().tolist()
+    for c in cats:
+        block = df.index[df['category'] == c].tolist()
+        if not block: continue
+        block_sorted = sorted(block, key=lambda i: (df.loc[i, 'rank'] if df.loc[i, 'rank'] > 0 else 10**9, -df.loc[i, 'installs']))
+        for start in range(0, len(block_sorted), window):
+            add_session(block_sorted[start:start+window])
+
+    # Global sessions
+    if 'rank' in df.columns and df['rank'].notna().any():
+        ordered = df.index.tolist()
+        ordered.sort(key=lambda i: (df.loc[i, 'rank'] if df.loc[i, 'rank'] > 0 else 10**9, -df.loc[i, 'installs']))
+    else:
+        ordered = df.sort_values('installs', ascending=False).index.tolist()
+    for start in range(0, len(ordered), window):
+        add_session(ordered[start:start+window])
+
+    deg = co.sum(axis=1) + 1e-9
+    norm = np.sqrt(np.outer(deg, deg))
+    sim = co / norm
+    np.fill_diagonal(sim, 1.0)
+    return sim
+
+def recommend_collab_item_item(df: pd.DataFrame, sim_mat: np.ndarray, seed_indices: List[int], top_k: int, mask: np.ndarray) -> Tuple[List[int], np.ndarray]:
+    if len(seed_indices) == 0:
+        degree = sim_mat.sum(axis=1)
+        scores = degree.copy()
+    else:
+        scores = sim_mat[:, seed_indices].mean(axis=1)
+
+    scores = np.asarray(scores).ravel().astype(float)
+    if len(seed_indices):
+        scores[seed_indices] = -1.0
+    scores[~mask] = -1.0
+
+    order = np.argsort(scores)[::-1]
+    idx = [i for i in order if scores[i] >= 0][:top_k]
+    return idx, scores
+
+# Hybrid scoring (Method: Hybrid | Algorithm: Weighted Linear Fusion)
 def hybrid_score(base, boosts, alpha=0.7, beta=0.2, gamma=0.1):
     quality = 0.6 * boosts['rating_boost'].values + 0.4 * boosts['volume_boost'].values
     return alpha*base + beta*boosts['popularity_boost'].values + gamma*quality
 
-# ===== Recommenders (4 approaches incl. SGD)
-
+# Recommenders (Content, CF, Hybrid)
 def recommend_content(df, X, seed_indices: List[int], top_k: int, mask: np.ndarray) -> Tuple[List[int], np.ndarray]:
+    # Cosine kNN over TF‑IDF vectors (average if multiple seeds)
     base = np.zeros(len(df)) if len(seed_indices)==0 else cosine_similarity(X, X[seed_indices]).mean(axis=1).ravel()
     scores = base.copy()
     scores[~mask] = -1
@@ -103,17 +169,6 @@ def recommend_content(df, X, seed_indices: List[int], top_k: int, mask: np.ndarr
     order = np.argsort(scores)[::-1]
     idx = [i for i in order if scores[i] >= 0][:top_k]
     return idx, scores
-
-
-def recommend_popularity(df, boosts, top_k: int, mask: np.ndarray) -> Tuple[List[int], np.ndarray]:
-    # non‑personalized: popularity + quality
-    scores = 0.7*boosts['popularity_boost'].values + 0.3*(0.6*boosts['rating_boost'].values + 0.4*boosts['volume_boost'].values)
-    scores = scores.astype(float)
-    scores[~mask] = -1
-    order = np.argsort(scores)[::-1]
-    idx = [i for i in order if scores[i] >= 0][:top_k]
-    return idx, scores
-
 
 def recommend_hybrid(df, X, boosts, seed_indices: List[int], top_k: int, mask: np.ndarray,
                      alpha=0.7, beta=0.2, gamma=0.1) -> Tuple[List[int], np.ndarray]:
@@ -125,49 +180,7 @@ def recommend_hybrid(df, X, boosts, seed_indices: List[int], top_k: int, mask: n
     idx = [i for i in order if scores[i] >= 0][:top_k]
     return idx, scores
 
-
-def recommend_sgd_linear(df, X, seed_indices: List[int], top_k: int, mask: np.ndarray,
-                          n_neg: int = 500, alpha: float = 1e-4, loss: str = "log_loss") -> Tuple[List[int], np.ndarray]:
-    """
-    Train a quick personalized linear model with SGD.
-    Positives = user's selected seeds; Negatives = random non-seed items.
-    Scores are decision_function over all items.
-    """
-    n = len(df)
-    if len(seed_indices) == 0:
-        return [], np.full(n, -1.0)
-    rng = np.random.default_rng(42)
-    all_idx = np.arange(n)
-    neg_pool = np.setdiff1d(all_idx, np.array(seed_indices), assume_unique=False)
-    n_neg = int(min(n_neg, len(neg_pool)))
-    if n_neg <= 0:
-        return [], np.full(n, -1.0)
-    neg_idx = rng.choice(neg_pool, size=n_neg, replace=False)
-
-    X_train = sp_vstack([X[seed_indices], X[neg_idx]])
-    y = np.concatenate([np.ones(len(seed_indices)), np.zeros(n_neg)])
-
-    clf = SGDClassifier(loss=loss, alpha=alpha, max_iter=1000, tol=1e-3, class_weight="balanced", random_state=42)
-    clf.fit(X_train, y)
-
-    # Decision scores for all items
-    try:
-        scores = clf.decision_function(X)
-    except Exception:
-        # Some losses expose predict_proba only; fallback to that
-        proba = clf.predict_proba(X)[:, 1]
-        scores = proba
-
-    scores = np.asarray(scores, dtype=float)
-    scores[~mask] = -1
-    if len(seed_indices):
-        scores[seed_indices] = -1
-    order = np.argsort(scores)[::-1]
-    idx = [i for i in order if scores[i] >= 0][:top_k]
-    return idx, scores
-
-# ===== Evaluation helpers
-
+# Evaluation helpers
 def precision_recall_at_k(recommended: List[int], relevant: set, k: int) -> Tuple[float, float]:
     if k == 0:
         return 0.0, 0.0
@@ -177,24 +190,23 @@ def precision_recall_at_k(recommended: List[int], relevant: set, k: int) -> Tupl
     recall = hits / len(relevant) if relevant else 0.0
     return precision, recall
 
-
 def diversity_gini(indices: List[int], X) -> float:
-    # higher means more diverse
     if len(indices) < 2:
         return 0.0
     vecs = X[indices]
     sim = cosine_similarity(vecs)
     n = len(indices)
-    # exclude diagonal
     upper = sim[np.triu_indices(n, 1)]
     avg_sim = upper.mean() if upper.size else 0.0
     return 1.0 - float(avg_sim)
 
-# =========================
 # UI
-# =========================
-st.set_page_config(page_title="Game Recommender (Multi‑approach)", page_icon="👾", layout="wide")
-st.title("🕹️ Top Games Recommender – Multi‑Approach + Evaluation")
+st.set_page_config(page_title="Game Recommender (Content + CF + Hybrid)", page_icon="👾", layout="wide")
+st.title("🕹️ Top Games Recommender – Content • Collaborative • Hybrid")
+
+# Official method/algorithm banner (for marker clarity)
+st.info("**Official Submission** — Method: Content-Based | Algorithm: TF‑IDF + Cosine kNN", icon="✅")
+
 st.caption(f"Data source: `{CSV_PATH}` (auto‑reloads when the file changes)")
 
 # Load data automatic
@@ -202,6 +214,7 @@ try:
     mtime = os.path.getmtime(CSV_PATH) if os.path.exists(CSV_PATH) else 0.0
     df = load_data(CSV_PATH, mtime)
     vec, X, boosts = prepare_model(df)
+    sim_cf = build_item_item_cf(df, window=60)
 except Exception as e:
     st.error(f"Could not load dataset at {CSV_PATH}. Error: {e}")
     st.stop()
@@ -214,41 +227,25 @@ chosen_cat = st.sidebar.selectbox("🎮 Category", categories)
 min_rating = st.sidebar.slider("Minimum Rating ⭐", 0.0, 5.0, 3.5, 0.1)
 min_installs = st.sidebar.number_input("Minimum Installs 📦", value=0, step=1000)
 
-st.sidebar.header("⚙️ Algorithm")
-algo = st.sidebar.selectbox("Choose approach", [
-    "Content‑Based (TF‑IDF)",
-    "Popularity + Quality (Non‑personalized)",
-    "Hybrid (Content + Popularity + Quality)",
-    "Personalized SGD (linear)"
+st.sidebar.header("⚙️ Method & Algorithm")
+algo = st.sidebar.selectbox("Choose approach to **demo**", [
+    "Content‑Based — TF‑IDF + Cosine kNN (Official)",
+    "Collaborative Filtering — Item‑Item kNN (Co‑visitation + Cosine)",
+    "Hybrid — Weighted Linear Fusion (Content + Popularity + Quality)"
 ])
-
-# SGD algorithms
-if algo == "Personalized SGD (linear)":
-    sgd_neg = st.sidebar.slider("SGD negative samples", 100, 2000, 500, 50)
-    sgd_alpha = st.sidebar.select_slider("SGD regularization α", options=[1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2], value=1e-4)
-    sgd_loss = st.sidebar.selectbox("SGD loss", ["log_loss", "hinge"])  # logistic vs linear SVM
-else:
-    sgd_neg, sgd_alpha, sgd_loss = 500, 1e-4, "log_loss"
 
 st.sidebar.header("⚖️ Weights (Hybrid only)")
 alpha = st.sidebar.slider("Content Similarity (α)", 0.0, 1.0, 0.7, 0.05)
 beta  = st.sidebar.slider("Popularity / Installs (β)", 0.0, 1.0, 0.2, 0.05)
 gamma = st.sidebar.slider("Quality: Rating + Volume (γ)", 0.0, 1.0, 0.1, 0.05)
-if algo != "Hybrid (Content + Popularity + Quality)":
+if "Hybrid" not in algo:
     alpha, beta, gamma = 0.7, 0.2, 0.1
 else:
     total = alpha + beta + gamma or 1.0
     alpha, beta, gamma = alpha/total, beta/total, gamma/total
 
-rule_filters = dict(
-    price_type=price_type,
-    category=chosen_cat,
-    min_rating=min_rating,
-    min_installs=min_installs
-)
-
 # Data selection
-st.subheader("1) Pick games you like 🎯 (for content/hybrid)")
+st.subheader("1) Pick games you like 🎯 (for personalized methods)")
 seed_titles = st.multiselect("Choose games:", options=df['title'].tolist())
 seed_idx = list(df.index[df['title'].isin(seed_titles)])
 
@@ -277,17 +274,15 @@ mask_arr = mask.to_numpy()
 st.subheader("2) Recommendations ✅")
 k = st.number_input("Number of recommendations", min_value=5, max_value=40, value=SEED_DEFAULT_K)
 
-if algo == "Content‑Based (TF‑IDF)":
+if algo.startswith("Content‑Based"):
     top_idx, scores = recommend_content(df, X, seed_idx, int(k), mask_arr)
-elif algo == "Popularity + Quality (Non‑personalized)":
-    top_idx, scores = recommend_popularity(df, boosts, int(k), mask_arr)
-elif algo == "Hybrid (Content + Popularity + Quality)":
+elif algo.startswith("Collaborative"):
+    top_idx, scores = recommend_collab_item_item(df, sim_cf, seed_idx, int(k), mask_arr)
+else:  # Hybrid
     top_idx, scores = recommend_hybrid(df, X, boosts, seed_idx, int(k), mask_arr, alpha, beta, gamma)
-else:
-    top_idx, scores = recommend_sgd_linear(df, X, seed_idx, int(k), mask_arr, n_neg=sgd_neg, alpha=float(sgd_alpha), loss=sgd_loss)
 
 if not top_idx:
-    st.warning("No matches found. Relax your filters or select some seeds (for content/hybrid).")
+    st.warning("No matches found. Relax your filters or select some seeds (for personalized methods).")
 else:
     st.success(f"Found {len(top_idx)} recommendation(s). Approach: {algo}")
     for rank, i in enumerate(top_idx, start=1):
@@ -304,9 +299,9 @@ else:
             st.markdown(f"**🎮 Category:** {row['category']}")
         with cols[3]:
             reason = {
-                "Content‑Based (TF‑IDF)": "content similarity (title/desc/category)",
-                "Popularity + Quality (Non‑personalized)": "top installs + high rating & votes",
-                "Hybrid (Content + Popularity + Quality)": "content similarity + installs + rating"
+                "Content‑Based — TF‑IDF + Cosine kNN (Official)": "content similarity over TF‑IDF vectors",
+                "Collaborative Filtering — Item‑Item kNN (Co‑visitation + Cosine)": "items co‑appearing in sessions (cosine‑normalized)",
+                "Hybrid — Weighted Linear Fusion (Content + Popularity + Quality)": "weighted blend of content similarity and popularity/quality signals"
             }[algo]
             st.markdown(f"**🧠 Why:** {reason}")
         st.markdown("---")
@@ -315,7 +310,6 @@ else:
 st.subheader("3) Evaluation 📊 (offline metrics)")
 colA, colB, colC, colD = st.columns(4)
 
-# Define pseudo‑relevance - items in the same category as any seed are considered relevant
 relevant = set()
 if seed_idx:
     seed_cats = set(df.iloc[seed_idx]['category'].tolist())
@@ -333,46 +327,4 @@ with colD:
     coverage = len(set(top_idx)) / max(1, len(df))
     st.metric("Catalog Coverage", f"{coverage*100:.2f}%")
 
-st.caption("Notes: Precision/Recall computed vs. items sharing the same category as selected seeds (proxy ground truth). RMSE is not reported because the dataset lacks user‑specific ratings. If you add a user‑item rating matrix later, use RMSE/MSE for predictions.")
-
-# Simple user feedback collection
-st.subheader("4) Quick User Feedback ✍️")
-if 'feedback' not in st.session_state:
-    st.session_state['feedback'] = []
-
-fb_col1, fb_col2 = st.columns([3,1])
-with fb_col1:
-    fb_text = st.text_input("Tell us if these recommendations are useful (optional)")
-with fb_col2:
-    if st.button("Submit Feedback"):
-        if fb_text.strip():
-            st.session_state['feedback'].append(fb_text.strip())
-            st.success("Thanks! Your feedback has been recorded locally for this demo.")
-        else:
-            st.info("Please enter some feedback text before submitting.")
-
-if st.session_state['feedback']:
-    st.write("**Collected Feedback (session):**")
-    for i, t in enumerate(st.session_state['feedback'], 1):
-        st.write(f"{i}. {t}")
-
-# Trending browser (uses popularity/quality)
-st.subheader("Or, browse trending 🔥")
-
-pq_scores = 0.7*boosts['popularity_boost'].values + 0.3*(0.6*boosts['rating_boost'].values + 0.4*boosts['volume_boost'].values)
-order = np.argsort(pq_scores)[::-1]
-trending_idx = [i for i in order if mask_arr[i]][:10]
-
-if trending_idx:
-    cols = st.columns(2)
-    for j, i in enumerate(trending_idx, start=1):
-        row = df.iloc[i]
-        with cols[(j-1) % 2]:
-            st.markdown(
-                f"**{j}. {row['title']}**  \n"
-                f"⭐ {row['average_rating']:.2f} | "
-                f"📦 {int(row['installs']):,}+ | "
-                f"🎮 {row['category']}"
-            )
-else:
-    st.info("No trending items match your filters.")
+st.caption("Terminology: Methods = Content‑Based / Collaborative / Hybrid. Algorithms here are TF‑IDF + Cosine kNN (Content‑Based), Item‑Item kNN via co‑visitation + Cosine (Collaborative), and Weighted Linear Fusion (Hybrid).")
