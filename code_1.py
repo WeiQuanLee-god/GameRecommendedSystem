@@ -18,7 +18,7 @@ from sklearn.decomposition import TruncatedSVD
 # =========================
 # SETTINGS
 # =========================
-CSV_PATH = "android-games.csv"   # change if needed
+CSV_PATH = "games.csv"   # change if needed
 SEED_DEFAULT_K = 12
 
 # =========================
