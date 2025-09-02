@@ -14,12 +14,15 @@ from typing import List, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-
+# =========================
 # SETTINGS
+# =========================
 CSV_PATH = "D:/AI_Project/games.csv"   # change if needed
 SEED_DEFAULT_K = 12
 
+# =========================
 # Helpers
+# =========================
 def parse_installs(val):
     if pd.isna(val): return np.nan
     s = str(val).strip()
@@ -65,7 +68,7 @@ def load_data(csv_path: str, mtime: float):
     df.reset_index(drop=True, inplace=True)
     return df
 
-# Content representation (ALGORITHM: TF‑IDF + Cosine kNN)
+# ===== Content representation (ALGORITHM: TF‑IDF + Cosine kNN)
 @st.cache_data(show_spinner=False)
 def build_content_matrix(df):
     """
@@ -95,7 +98,7 @@ def prepare_model(df: pd.DataFrame):
     })
     return vec, X, boosts
 
-# Collaborative Filtering via Co‑Visitation (Item‑Item kNN)
+# ======== Collaborative Filtering via Co‑Visitation (Item‑Item kNN) ========
 @st.cache_data(show_spinner=False)
 def build_item_item_cf(df: pd.DataFrame, window: int = 60) -> np.ndarray:
     """
@@ -154,12 +157,12 @@ def recommend_collab_item_item(df: pd.DataFrame, sim_mat: np.ndarray, seed_indic
     idx = [i for i in order if scores[i] >= 0][:top_k]
     return idx, scores
 
-# Hybrid scoring (Method: Hybrid | Algorithm: Weighted Linear Fusion)
+# ===== Hybrid scoring (Method: Hybrid | Algorithm: Weighted Linear Fusion)
 def hybrid_score(base, boosts, alpha=0.7, beta=0.2, gamma=0.1):
     quality = 0.6 * boosts['rating_boost'].values + 0.4 * boosts['volume_boost'].values
     return alpha*base + beta*boosts['popularity_boost'].values + gamma*quality
 
-# Recommenders (Content, CF, Hybrid)
+# ===== Recommenders (Content, CF, Hybrid)
 def recommend_content(df, X, seed_indices: List[int], top_k: int, mask: np.ndarray) -> Tuple[List[int], np.ndarray]:
     # Cosine kNN over TF‑IDF vectors (average if multiple seeds)
     base = np.zeros(len(df)) if len(seed_indices)==0 else cosine_similarity(X, X[seed_indices]).mean(axis=1).ravel()
@@ -180,7 +183,7 @@ def recommend_hybrid(df, X, boosts, seed_indices: List[int], top_k: int, mask: n
     idx = [i for i in order if scores[i] >= 0][:top_k]
     return idx, scores
 
-# Evaluation helpers
+# ===== Evaluation helpers
 def precision_recall_at_k(recommended: List[int], relevant: set, k: int) -> Tuple[float, float]:
     if k == 0:
         return 0.0, 0.0
@@ -200,7 +203,9 @@ def diversity_gini(indices: List[int], X) -> float:
     avg_sim = upper.mean() if upper.size else 0.0
     return 1.0 - float(avg_sim)
 
+# =========================
 # UI
+# =========================
 st.set_page_config(page_title="Game Recommender (Content + CF + Hybrid)", page_icon="👾", layout="wide")
 st.title("🕹️ Top Games Recommender – Content • Collaborative • Hybrid")
 
@@ -228,7 +233,7 @@ min_rating = st.sidebar.slider("Minimum Rating ⭐", 0.0, 5.0, 3.5, 0.1)
 min_installs = st.sidebar.number_input("Minimum Installs 📦", value=0, step=1000)
 
 st.sidebar.header("⚙️ Method & Algorithm")
-algo = st.sidebar.selectbox("Choose approach to **demo**", [
+algo = st.sidebar.selectbox("Choose approach to **show output**", [
     "Content‑Based — TF‑IDF + Cosine kNN (Official)",
     "Collaborative Filtering — Item‑Item kNN (Co‑visitation + Cosine)",
     "Hybrid — Weighted Linear Fusion (Content + Popularity + Quality)"
@@ -310,6 +315,7 @@ else:
 st.subheader("3) Evaluation 📊 (offline metrics)")
 colA, colB, colC, colD = st.columns(4)
 
+# Proxy relevance: same category as any seed (since no user ratings)
 relevant = set()
 if seed_idx:
     seed_cats = set(df.iloc[seed_idx]['category'].tolist())
